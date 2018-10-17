@@ -1,0 +1,540 @@
+---
+title: "Grouping Large Datasets: Supervised & Unsupervised Leeds Method"
+author: "James Sims PhD"
+date: ""
+header-includes:
+   - \usepackage{eso-pic,graphicx,transparent}
+output: 
+  pdf_document:
+    fig_caption: yes
+---
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(reshape2)
+```
+Self-published online:  `r date()`  
+Text license:  CC 4.0 Attribution  
+
+##Abstract  
+This article describes the behavior of the genetic genealogy technique known as the Leeds Method[^1] when the size of the DNA match table increases past a few dozen matches, and when the original parameters of the technique are modified. In this study, a reproducible implementation of the Leeds Method in the R statistical programming environment was used to analyze the author's matches at AncestryDNA[^2].  
+
+[^1]: [Dana Stewart Leeds, Dana Leeds blog, accessed September 25, 2018](https://danaleeds.com/)   
+[^2]:[James Sims, pub_leeds repository, GitHub, accessed September 24, 2018](https://github.com/simsj/pub_leeds)  
+
+##Introduction  
+Genetic genealogists face a challenging task when they try to properly categorize autosomal DNA matches as being due to DNA inherited from specific ancestors. The Leeds Method, developed by Dana Stewart Leeds, is a method originally designed to summarize predicted second cousin (2C) and third cousin (3C) matches at AncestryDNA by creating match groups. There are compelling reasons to use this method as originally described when *beginning* to assess how DNA matches are related to a test-taker as described previously by the author, cited above. However, for this study, a computer-based implementation of the Leeds Method in a programming language was a requirement for reasons of reproducibility and for relative ease of data analysis.  
+
+The behavior of the Leeds Method with large data sets has not been previously described. In this study, data sets of up to 2,571 matches were grouped by the Leeds Method.  The number of groups and the size of the groups created by the method were assessed as a function of the size of the match list. The position of certain matches in the match table, who have more than one genealogical relationship with the test-taker, are expected to have effects on the number of groups created and the size of groups, especially if such matches are near the top of the match table. This is a consequence of the sequential row by row, top down nature of the method. This study reports on the positional effects of a pair of DNA matches for people who each have two genealogical relationships to the test-taker (the author), namely those of maternal 2C and maternal second cousin once removed (2C1R).  
+
+##Data sources 
+The data sources from AncestryDNA and the methods used to obtain them for this study were the same sources and methods as described previously by the author.  The .csv format match file and the .csv format in-common-with match file were imported into the free version of the R statistical programming environment[^3] using the free version of RStudio[^4], an integrated development environment for R. These data sources are not included in the GitHub repository with this article due to privacy considerations[^6].  
+
+[^3]: [R Core Team (2018). R: A language and environment for statistical computing.R Foundation for Statistical Computing, Vienna, Austria. URL https://www.R-project.org/.](https://www.R-project.org/)  
+
+[^4]: [RStudio Team (2016). RStudio: Integrated Development for R. RStudio, Inc., Boston, MA URL http://www.rstudio.com/](http://www.rstudio.com/)  
+  
+[^6]:  [James Sims, pub_leeds_4C repository, GitHub, accessed September 24, 2018](https://github.com/simsj/pub_leeds_4C)  
+
+
+```{r importdata,echo=FALSE, include=FALSE, cache=TRUE}
+# create variables with file names to be used
+match_file <- "m_James_L_Sims.csv"          # NEED TO MAKE THESE ANONYMOUS IN PUB VERSION
+icw_file <- "icw_James_L_Sims.csv"
+
+# import the matches file
+matches <- read_csv(match_file)
+
+# import in-common-with matches file  
+icw_matches <- read_csv(icw_file)
+```
+
+There were `r nrow(matches)` rows of data, one row per match, in the matches file. There were `r nrow(icw_matches)` rows of data in the in-common-with file.  
+
+
+##Applying Unsupervised Leeds to Large Datasets  
+Leeds' original implementation of the grouping method assumed no prior knowledge of the matches being grouped.  In this study, the term unsupervised is used to describe that version of the Leeds Method and its lack of assumptions or knowledge about the matches, and makes no changes to the match table order. Leeds applied the method only to 2C and 3C matches originally.  In this study, the match table was expanded to include matches that are predicted 2C, 3C and 4C cousins before applying the unsupervised Leeds Method. Because AncestryDNA requires in-common-with matches (shared matches) to be at least predicted 4C matches of the test-taker and the in-common-with match, predicted distant cousins were excluded. As described by Leeds, a second filter was applied to remove any matches that shared 400 cM or more DNA with the author.  
+```{r filtermatches, include=FALSE,echo=FALSE}
+# filter matches to include only predicted 2C, 3C, & 4C
+filtered_matches <- filter(matches, range %in% c("SECOND_COUSIN",
+                                                 "THIRD_COUSIN",
+                                                 "FOURTH_COUSIN"))
+
+# filter out any matches that are greater than or equal to 400 cM
+filtered_matches <- filter(filtered_matches,sharedCM < 400)
+```
+
+After applying these filters, there were `r nrow(filtered_matches)` rows of data, one row per match.  The filtered matches appeared to be sorted by shared cM values in descending order. A descending cM value order was enforced on the filtered matches by sorting the data in descending order in R. Looking at the filtered list of matches, the predicted cousin frequencies were as follows.  
+
+```{r include=FALSE,echo=FALSE}
+# sort filtered_matches high to low
+filtered_matches <- arrange(filtered_matches, desc(sharedCM))
+```
+
+```{r include=TRUE,echo=FALSE}
+# summary of filtered matches by predicted range
+table(filtered_matches$range)
+```
+
+```{r include=FALSE,echo=FALSE}
+# retain all rows, but only include these columns in order
+group_these <- select(filtered_matches,c(2,4,3,5,6,8,9))
+```
+
+  
+```{r include=FALSE, echo=FALSE}
+#show the column names in a table
+colnames(group_these)
+```
+
+
+```{r lookupfun, getmatch_icw, include=FALSE,echo=FALSE,cache=TRUE}
+getmatch_icw <- function(amatchid,icw_matches){
+  # takes an AncestryDNA matchid value
+  # takes the in-common-with match dataframe
+  # returns the matchids for the shared matches
+  temp <- filter(icw_matches,matchid == amatchid) %>%
+    # column 4 contains the icwids
+    select(4)
+  temp
+}
+```
+
+  
+```{r, leedsfun, include=FALSE,echo=FALSE, cache=TRUE}
+get_leeds <- function(thedf,theicws){
+  for(i in 1:nrow(thedf)){
+  if(i==1){
+    # need to add the first new column to grouped dataframe, initially empty
+    grouped <- mutate(thedf,G1 = "")
+    # populate column cells with the value TRUE when a match shares a match
+    testing <- getmatch_icw(grouped$matchid[i],theicws)
+    scoreTRUE <- which(apply(grouped,1, function(r) any(r %in% testing$icwid)))
+    scoreTRUE <- c(i,scoreTRUE)
+    grouped[scoreTRUE,ncol(grouped)] <- TRUE
+  }
+  # need to test row for any TRUE values for columns beginning with G
+  # if TRUE is found, skip this row when building new columns
+  # because this match has been previously grouped; 
+  # otherwise create a new column
+  checkrow <- grouped[i,]
+  if(sum(apply(checkrow,2,function(s) any(s == TRUE)))==0){
+    # this is a row that needs to have a new column started for it
+    varname <- paste("G",ncol(grouped) - 6,sep="")
+    grouped[[varname]] <- ""
+    testing <- getmatch_icw(grouped$matchid[i],theicws)
+    scoreTRUE <- which(apply(grouped,1, function(r) any(r %in% testing$icwid)))
+    scoreTRUE <- c(i,scoreTRUE)
+    grouped[scoreTRUE,ncol(grouped)] <- TRUE
+  }
+  }
+  # return a dataframe with output of the Leeds Method grouping
+  grouped
+}
+```
+
+```{r unsupervised_leeds,include=FALSE,echo=FALSE,cache=TRUE}
+# set up different size datasets to group: numbers are number of matches
+# last number is number of total matches that are 2C + 3C + 4C
+# if you try to look up in-common-with matches for distant cousins, the code will fail
+# AncestryDNA only reports in-common-with matches at are at least 4C to both people
+data_size <- c(16,32,64,128,
+               256,512,1024,2048,
+               nrow(group_these))
+
+# initialize an empty list to hold grouped datasets
+leeds_grouped_list <- list()
+
+# populate list that holds grouped datasets
+for(i in 1:length(data_size)){
+  leeds_grouped_list[[i]] <- get_leeds(group_these[1:data_size[i],],icw_matches)
+}
+```
+
+The author's filtered matches were used to generate data sets of increasing size beginning with the first (top) row of the filtered matches being the first row of *each* data set.  The match table sizes (matches, rows) chosen for this purpose represent seven doublings of the match table size plus a data set containing all of the filtered matches. Those data set sizes are shown in the output of R code below.    
+```{r include=TRUE,echo=FALSE}
+#show sizes of match tables (number of matches)
+data_size
+```
+
+
+```{r include=FALSE,echo=FALSE}
+# create a vector containing number of groups for each grouped dataset initially empty
+num_groups <- as.integer()
+
+# populate vector
+for(i in 1:length(leeds_grouped_list)){
+  num_groups[i] <- ncol(select(leeds_grouped_list[[i]],starts_with("G")))
+}
+
+# create a datafame with two variables for plotting: data size and number of groups
+plot_these <- as.data.frame(cbind(data_size,num_groups))
+```
+
+The following table shows the number of groups created by unsupervised Leeds as the match table size increases.  
+```{r, include=TRUE,echo=FALSE}
+# display as a table: match table size and groups created
+# data_size: number of rows of matches in table
+# num_groups: number of groups created by the unsupervised Leeds Method of grouping
+
+plot_these
+```
+
+```{r uallgroups, fig.cap = "Increase in number of match groups as a function of table size for unsupervised Leeds.\\label{fig:uallgroups}",fig.height=3,fig.width=5, include=TRUE,echo=FALSE}
+# plot groups as a function of match table size
+
+ggplot(plot_these,aes(data_size,num_groups)) +
+  geom_point() +
+  geom_line() +
+  theme_light() +
+  xlab("Matches in Table") +
+  ylab("Number of Groups")
+```
+
+
+
+The growth in the total number of match groups as a function of table size is also plotted in Fig. \ref{fig:uallgroups}.  
+
+```{r include=FALSE,echo=FALSE}
+# create a list to hold group sizes, initially empty
+group_size_list <- list()
+
+# iterate over leeds_grouped_list members 
+for(i in 1:length(leeds_grouped_list)){
+  
+  # create a temporary dataframe with just the group variables
+  groups <- select(leeds_grouped_list[[i]],starts_with("G"))
+  
+  # count members of each group and add named integer vector to group_size_list
+  group_size_list[[i]] <- apply(groups, 2, function(x) length(x[x==TRUE]))
+  
+}
+```
+
+```{r include=FALSE,echo=FALSE}
+# calculate the maximum number of Leeds groups created
+maxgroups <- length(group_size_list[[length(group_size_list)]])
+
+# make all the vectors of group sizes the same length padding right with zeros as needed
+for(i in 1:length(group_size_list)){
+  zeros <- rep(0,(maxgroups - length(group_size_list[[i]])))
+  group_size_list[[i]] <- append(group_size_list[[i]],zeros)
+}
+
+# combine vectors into a dataframe in preparation for use with ggplot2
+for(i in length(group_size_list):1){
+  if(i == length(group_size_list)){
+    atable <- group_size_list[[i]]
+  }
+  atable <- rbind(atable,group_size_list[[i]])
+}
+atable <- as.data.frame(atable)
+
+# remove first row artifact of rbinding
+atable <- atable[-1,]
+
+# restore datasize values as first column
+tsize <- rev(plot_these$data_size)
+atable <- cbind(tsize,atable)
+rownames(atable) <- rev(plot_these$data_size)
+
+# call melt on atable to generate variables for use in statistics
+atable_melted <- melt(atable, id="tsize")
+colnames(atable_melted) <- c("tsize","group","gsize")
+```
+
+```{r include=FALSE,echo=FALSE}
+# subset atable for data on first 8 Leeds groups
+first8 <- select(atable,1:9)
+
+# convert group columns to cases
+chart_data <- melt(first8, id="tsize")
+
+# update column names
+colnames(chart_data) <- c("tsize","group","gsize")
+```
+
+
+```{r ufirst8, fig.cap = "Increase in size of first eight match groups as a function of table size for unsupervised Leeds.\\label{fig:ufirst8}",fig.height=3,fig.width=5,include=TRUE,echo=FALSE}
+ggplot()+
+  geom_point(data=chart_data,
+           aes(x=tsize,
+               y=gsize, 
+               color=group)) + 
+ geom_line(data=chart_data,
+           aes(x=tsize,
+               y=gsize, 
+               color=group)) +
+  theme_light() +
+  xlab("Matches in Table") +
+  ylab("Group Size")
+```
+
+The growth of the first eight groups as a function of increasing match table size is shown in Fig. \ref{fig:ufirst8}.  In the R implementation of the grouping procedure, groups are given names rather than colors, and those names begin with the letter G, followed by a number.  In this study, the line colors for groups G1-G8 were assigned automatically by R and have no significance other than the ease of presentation of the data in a single graph. In this labeling scheme, the G1 group was created before the G2 group, G2 before G3, etc. by unsupervised Leeds.  
+
+One group, G1, grew much larger and more quickly than the other first eight groups as shown in Fig. \ref{fig:ufirst8}. Group G1 was created based on the first match (top row) of the match table. This match shares the most DNA with the author of any match in the match table. In the unsupervised Leeds Method grouping, we either know nothing about the match's relationship to the test-taker (in this case, the author) or we ignore what we know.  Here, the case is the latter. This match is related to the author two ways: as a maternal 2C and as a maternal 2C1R.  
+
+The table shown in the R code output below summarizes the groups created by the unsupervised Leeds Method as the size of the match table size increases.  
+
+```{r include=TRUE,echo=FALSE}
+#display a table with group statistics for unsupervised Leeds
+atable_melted <- as.tibble(atable_melted)
+atable_melted$group <- as.character(atable_melted$group)
+
+filter(atable_melted,gsize>0) %>%
+  group_by(tsize)  %>%
+  summarise(groups = length(unique(group)),
+            gmin = min(gsize),
+            gmax = max(gsize), 
+            gmean = format(round(mean(gsize),1),nsmall=2), 
+            gmedian = format(round(median(gsize),1), nsmall=2),
+            sd = format(round(sd(gsize),1),nsmall=2))
+```
+
+In this table, *tsize* is the number of matches in the match table; *groups* is the number of groups produced for a given table size; *gmin* is the minimum size (number of shared matches) for the groups created; *gmax* is the maximum size for the groups created; *gmean* gives the arithmetic average size of the groups created;  *gmedian* gives the value for the median group size,  that is, the size of the group that half the groups are below and half of the groups are above; and *sd* is the standard deviation of the group sizes. When the mean (average) group size does not equal the median group size, this indicates the data are skewed (shift left or shift right) compared to what mathematicians call the normal distribution.  
+
+```{r histounsuper, fig.cap = "Distribution of match group size when the match table size is the largest for unsupervised Leeds.\\label{fig:histounsuper}",fig.height=3,fig.width=5,include=TRUE,echo=FALSE}
+show_these <- filter(atable_melted, tsize == max(tsize))
+# hist(show_these$gsize,50)
+show_these <- as.tibble(show_these)
+ggplot(show_these,aes(x=gsize)) +
+  geom_histogram(binwidth=3) +
+  theme_light() +
+  xlab("Group Size") +
+  ylab("Frequency")
+```
+
+
+
+The skewed shape of the group size distribution is confirmed in the histogram showing the distribution of group sizes in Fig. \ref{fig:histounsuper}. This is the general shape of the Poisson distribution, which is the distribution that describes collections of random events that ocurr independently of each other[^8].  
+
+[^8]: [Wikipedia, Poisson distribution, https://en.wikipedia.org/wiki/Poisson_distribution, accessed October 1, 2018](https://en.wikipedia.org/wiki/Poisson_distribution)  
+
+##Applying Supervised Leeds to Large Datasets
+```{r include=FALSE,echo=FALSE}
+#get the size of the largest group
+g1size_us <- filter(show_these,group=="G1") %>% summarize(total=sum(gsize))
+```
+
+In the unsupervised Leeds Method, group G1 grew faster and attained a much larger size compared to the other first eight groups as shown in Fig. \ref{fig:ufirst8} and Fig. \ref{fig:histounsuper}. G1 was created based on who shares DNA with the first match in the match table. G1 contained `r g1size_us$total[1]` shared matches. This match and the second match in the match table are 1Cs relative to each other, and both of them each have a 2C and a 2C1R genealogical relationship with the author due to cousin marriages in the author's maternal lines.  To test the effect matches 1 and 2 have on the grouping, as a first approach a slice/flip/stack methodology was use.  For the slice, the top two rows of each data set (always the same two matches) are sliced from the top of the table. For the flip, the slice of two rows is resorted into ascending cM order. And for the stack, the flipped two rows are appended to the bottom of the match table.  
+
+
+```{r slice_flip_stack,include=FALSE,echo=FALSE,cache=TRUE}
+# set up different size datasets to group: numbers are number of matches
+# last number is number of total matches that are 2C + 3C + 4C
+# if you try to look up in-common-with matches for distant cousins, the code will fail
+# AncestryDNA only reports in-common-with matches at are at least 4C to both people
+data_size_ss <- c(16,32,64,128,
+               256,512,1024,2048,
+               nrow(group_these))
+
+# initialize an empty list to hold grouped datasets
+leeds_grouped_list_ss <- list()
+
+# supervision applied to Leeds Method
+for(i in 1:length(data_size_ss)){
+  aset <- group_these[1:data_size_ss[i],]
+  # slice:
+  move_these <- slice(aset,1:2); aset <- slice(aset,3:nrow(aset))
+  # flip:
+  move_these <- arrange(move_these,sharedCM)
+  # stack:
+  stacked <- rbind(aset,move_these)
+  # collect results of Leeds Method:
+  leeds_grouped_list_ss[[i]] <- get_leeds(stacked,icw_matches)
+}
+```
+
+
+```{r supervised_version_num_groups,include=FALSE,echo=FALSE}
+# create a vector containing number of groups for each grouped dataset initially empty
+num_groups_ss <- as.integer()
+
+# populate vector
+for(i in 1:length(leeds_grouped_list_ss)){
+  num_groups_ss[i] <- ncol(select(leeds_grouped_list_ss[[i]],starts_with("G")))
+}
+
+# create a datafame with two variables for plotting: data size and number of groups
+plot_these_ss <- as.data.frame(cbind(data_size_ss,num_groups_ss))
+colnames(plot_these_ss) <- c("data_size","groups_supervised")
+plot_these_ss <- cbind(plot_these_ss,plot_these$num_groups)
+colnames(plot_these_ss) <- c("data_size","supervised","unsupervised")
+```
+
+The output of the R code chunk below is a table comparing the total number of groups created for supervised and unsupervised Leeds as a function of match table size.  The number of groups created for match table sizes up to 512 were very similar. As the match table grew larger, supervised Leeds produced a few more groups with the difference being an additional six groups for the largest data set.    
+```{r include=TRUE,echo=FALSE}
+#show table comparing total number of groups by different Leeds methods & table size
+plot_these_ss
+```
+
+
+```{r growthboth, fig.cap = "Comparison in the rate and extent of match group growth for two versions of Leeds.\\label{fig:growthboth}",fig.height=3,fig.width=5,include=TRUE,echo=FALSE}
+# plot groups supervised Leeds as a function of match table size
+
+plot_these_melted <- melt(plot_these_ss,id="data_size")
+colnames(plot_these_melted) <- c("size","group","thecount")
+ggplot(plot_these_melted,aes(data_size,x=size,y=thecount,color=group)) +
+  geom_point() +
+  geom_line() +
+  theme_light() +
+  xlab("Matches in Table") +
+  ylab("Number of Groups")
+```
+
+Fig. \ref{fig:growthboth} compares the growth in the total number of groups created by Leeds for the supervised and unsupervised versions of the method.  The rate of growth was very similar for match table sizes up to 512 matches. The supervised version of Leeds produced a few more groups than the unsupervised version did when the match table was larger.  
+
+```{r supervised_group_sizes, include=FALSE,echo=FALSE}
+# create a list to hold group sizes, initially empty
+group_size_list_ss <- list()
+
+# iterate over leeds_grouped_list members 
+for(i in 1:length(leeds_grouped_list_ss)){
+  
+  # create a temporary dataframe with just the group variables
+  groups_ss <- select(leeds_grouped_list_ss[[i]],starts_with("G"))
+  
+  # count members of each group and add named integer vector to group_size_list
+  group_size_list_ss[[i]] <- apply(groups_ss, 2, function(x) length(x[x==TRUE]))
+  
+}
+```
+
+```{r supervised_version_stats,include=FALSE,echo=FALSE}
+# calculate the maximum number of Leeds groups created
+maxgroups_ss <- length(group_size_list_ss[[length(group_size_list_ss)]])
+
+# make all the vectors of group sizes the same length padding right with zeros as needed
+for(i in 1:length(group_size_list_ss)){
+  zeros <- rep(0,(maxgroups_ss - length(group_size_list_ss[[i]])))
+  group_size_list_ss[[i]] <- append(group_size_list_ss[[i]],zeros)
+}
+
+# combine vectors into a dataframe in preparation for use with ggplot2
+for(i in length(group_size_list_ss):1){
+  if(i == length(group_size_list_ss)){
+    atable_ss <- group_size_list_ss[[i]]
+  }
+  atable_ss <- rbind(atable_ss,group_size_list_ss[[i]])
+}
+atable_ss <- as.data.frame(atable_ss)
+
+# remove first row artifact of rbinding
+atable_ss <- atable_ss[-1,]
+
+# restore datasize values as first column
+tsize <- rev(plot_these_ss$data_size)
+atable_ss <- cbind(tsize,atable_ss)
+rownames(atable_ss) <- rev(plot_these_ss$data_size)
+
+# call melt on atable_ss to generate variables for use in statistics
+atable_ss_melted <- melt(atable_ss, id="tsize")
+colnames(atable_ss_melted) <- c("tsize","group","gsize")
+```
+
+```{r supervised_version_dataprep,include=FALSE,echo=FALSE}
+# subset atable for data on first 8 Leeds groups
+first8_ss <- select(atable_ss,1:9)
+
+# convert group columns to cases
+chart_data_ss <- melt(first8_ss, id="tsize")
+
+# update column names
+colnames(chart_data_ss) <- c("tsize","group","gsize")
+```
+
+
+```{r first8super, fig.cap = "Growth of first eight match groups as a function of match table size for supervised Leeds.\\label{fig:first8super}",fig.height=3,fig.width=5,include=TRUE, echo=FALSE}
+ggplot()+
+  geom_point(data=chart_data_ss,
+           aes(x=tsize,
+               y=gsize)) + 
+ geom_line(data=chart_data_ss,
+           aes(x=tsize,
+               y=gsize, 
+               color=group)) +
+  theme_light() + 
+  xlab("Matches in Table") +
+  ylab("Group Size")
+  
+```
+
+Fig. \ref{fig:first8super} shows the rate and extent of growth of the first eight groups created by supervised Leeds.  The group names G1-G8 for supervised Leeds are not directly comparable to those shown in Fig. \ref{fig:ufirst8} for unsupervised Leeds.  For example, in unsupervised Leeds, group G1 was based on a match that is maternal for the author, but for supervised Leeds, G1 is based on a paternal match for the author. This is due to moving the first two matches in unsupervised Leeds to the bottom of the match table for supervised Leeds and on the relative placement of other matches in the table.   
+
+As shown in the output of R code below for the supervised method, there were modest reductions in mean group size and in the standard deviation of the group size for supervised versus unsupervised Leeds.  The was a significant decrease in the maximum size of the largest group for supervised Leeds compared to unsupervised Leeds.      
+
+```{r supervised_group_size_tab, include=TRUE,echo=FALSE}
+#calculated group statistics for supervised Leeds method, show as table
+atable_ss_melted <- as.tibble(atable_ss_melted)
+atable_ss_melted$group <- as.character(atable_ss_melted$group)
+
+filter(atable_ss_melted,gsize>0) %>%
+  group_by(tsize)  %>%
+  summarise(groups = length(unique(group)),
+            gmin = min(gsize),
+            gmax = max(gsize), 
+            gmean = format(round(mean(gsize),1),nsmall=1), 
+            gmedian = format(round(median(gsize),1),nsmall=1),
+            sd = format(round(sd(gsize),1),nsmall=1))
+```
+
+
+```{r supervised_histogram, fig.cap = "Distribution of match group size when the match table size is the largest for supervised Leeds.\\label{fig:supervised_histogram}",fig.height=3,fig.width=5,include=TRUE,echo=FALSE}
+show_these_ss <- filter(atable_ss_melted, tsize == max(tsize))
+# hist(show_these$gsize,50)
+show_these_ss <- as.tibble(show_these_ss)
+ggplot(show_these_ss,aes(x=gsize)) +
+  geom_histogram(binwidth=3) +
+  theme_light() +
+  xlab("Group Size") +
+  ylab("Frequency")
+```
+
+The distribution of group sizes for supervised Leeds is shown in Fig. \ref{fig:supervised_histogram}. This distribution is very similar to that of unsupervised Leeds as shown in Fig. \ref{fig:histounsuper}.  To determine the magnitude of the effect of supervision on the matches moved to the bottom of the table (special cases), the number of groups for the the match sharing the most DNA with the test-taker was examined.  The data for these comparisons is shown in the R code table below.    
+
+```{r include=FALSE,echo=FALSE}
+# unsupervised number of groups for row 1 
+unsuperFirst <- slice(leeds_grouped_list[[length(leeds_grouped_list)]],1)
+unsuperFirst_groups <-length(which(grepl("TRUE",select(unsuperFirst,starts_with("G")))))
+
+# supervised number of group last row
+superLast <- slice(leeds_grouped_list_ss[[length(leeds_grouped_list_ss)]],
+               nrow(leeds_grouped_list_ss[[length(leeds_grouped_list_ss)]]))
+
+superLast_groups <- length(which(grepl("TRUE", select(superLast,starts_with("G")))))
+```
+  
+
+| Leeds        | Number of Groups | Group Identity (G*n*) |
+|:------------:|:---------------|------------------------|
+| unsupervised | `r length(which(grepl("TRUE", select(unsuperFirst,starts_with("G")))))` | `r which(grepl("TRUE", select(unsuperFirst,starts_with("G"))))` |
+| supervised   | `r length(which(grepl("TRUE", select(superLast,starts_with("G")))))` | `r which(grepl("TRUE", select(superLast,starts_with("G"))))` |
+
+For the match sharing the most DNA with the test-taker,  that match was part of `r superLast_groups` match groups in supervised Leeds compared to just `r unsuperFirst_groups` match group in unsupervised Leeds.    
+\newpage 
+
+##Discussion  
+In our view, the Leeds Method as originally developed is an excellent tool to *begin* understanding predicted 2C and 3C cousin matches. It is well suited to the needs of beginning genealogists and those seeking birth families when the paper trail is very thin or nil. If one wants to apply the method to large groups of matches, say more than a few dozen, the method suffers from two problems. First, it becomes tedious. Experienced genealogists often tolerate a large amount of tedium in pursuit of insights, but inexperienced genealogists often have yet to develop their long game skills and may likely abandon tedious tasks. Second, it is easy to make mistakes applying the method and accuracy checking is also tedious.  A computer-based algorithmic implementation of the method has the potential to deal effectively with both these issues. A well constructed algorithmic implementation will also be reproducible: given the same two data files, namely a match list and an in-common-with match list, and the same software, the algorithm will produce the same results every time.  
+
+The supervised version of Leeds implemented in this study may offer advantages which are not easy to fully quantify at this time because genealogical research on the match list is incomplete. However, the effect of supervision on the matches that share the most DNA with the test-taker can be dramatic. For example, for the match table with a row size of 2571 in this study, the match occupying the first row in the unsupervised version of Leeds was a member of `r ifelse(unsuperFirst_groups == 1,paste(unsuperFirst_groups,"group.",sep=" "),paste(unsuperFirst_groups,"groups.",sep=" "))` This is the same match that occupies the last row of the match table with 2571 rows in supervised Leeds.  In supervised Leeds, that match was a member of `r ifelse(superLast_groups == 1,paste(superLast_groups,"group.",sep=" "),paste(superLast_groups,"groups!",sep=" "))`       
+
+
+It is hard to overestimate the importance of how helpful categorized close matches are when trying to understand so-called more distant stranger matches.  This example shows that valuable information may be overlooked if an unsupervised approach is taken and there are 2C matches in the match table with more than one *recent* genealogical relationship to the test-taker.   
+
+The author makes the following recommendations. First, use a supervised Leeds approach when appropriate.  Second, use the slice/flip/stack method described here for matches less than 400 cM when you know some matches have more than one *recent* genealogical relationship with the test-taker. Third, take an all matches or full stack approach. Append all matches sharing 400 cM or more to the bottom of the match table with the largest shared cM values at the bottom of the table. See Fig. 7. A full stack table so constructed will have a large number of matches sharing less than 400 cM with the test-taker at the top sorted with cM values high to low, followed by matches with more than one known *recent* genealogical relationship to the test taker sorted with cM values low to high, followed by the matches that share 400 cM or more sorted with cM values low to high.  A full stack approach should help the test-taker understand how their closest family members share DNA with the more distant DNA cousin matches.  At some point in the future, if you need to add new matches, add them to the bottom of the table to preserve the integrety of the inital implementation. 
+
+To be clear, the results in this study are the results of applying the Leeds Method to the matches of only one person, namely the author.  Although the methods used in this study should be applicable to most people's matches at AncestryDNA, and reproducible, a large variation in the number of match groups created by the method and the size of the match groups is expected for large data sets including 4C matches.  
+
+The vast majority of genealogists and genetic genealogists are not programmers, and learning to use a programming language like R is very, very challenging.  What is needed is for some enterprizing programmer to implement an automated Leeds Method tool along the line presented in this work.  The author does not have the skill set to provide a web interface or a cross-platform stand-alone application for automated Leeds.  
+
+
+
+
+![Full stack match table prepared for supervised Leeds. Gradient shows how matches are sorted, lighter is lower cM value matches. Colors show different portions of the table.](fullstack.png)  
+
+
+##Software  
+DNAGedcom Client version 2.1.6 (2.18) for Mac was used to download data from the author's account at AncestryDNA.  The free `r R.version.string` was used for this analysis. The code was developed in RStudio version 1.1.456. The tidyverse package version 1.2.1 was used to make coding easier and more readable for humans[^5].  This report was produced within the RStudio integrated development environment using rmarkdown version 1.10 and the knitr package version 1.2. and its dependencies. MacTeX-2018 was used for pdf output on a 2017 MacBook Pro running macOS version 10.13.6 (17G65), which is commonly called High Sierra. 
+
+[^5]: [Hadley Wickham, Tidyverse.org, tidyverse version 1.2.1](https://www.tidyverse.org/)  
+
